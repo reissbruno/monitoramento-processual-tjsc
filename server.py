@@ -73,7 +73,9 @@ processo = Query(
     path="/api/monitoramento-processual-tjsc/consulta", 
     tags=['monitoramento-processual-tjsc'])
 async def get_consulta(processo: str):
-    return await consulta.fetch(processo)
+    str_time = time.time()
+    telem = models.Telemetria(tentativas=1, tempo_total=str_time)
+    return await consulta.fetch(processo, telemetria=telem)
 
 
 #--------------------------- Static Files ------------------------------
