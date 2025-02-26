@@ -1,6 +1,7 @@
 from os import environ as env
 from datetime import datetime
 import time
+from urllib.parse import urljoin
 import base64
 
 from fastapi.logger import logger
@@ -12,6 +13,7 @@ import httpx
 
 # Local imports
 from src.models import Movimentacao  
+from utils.util import get_proxy
 
 # Captura variáveis de ambiente e cria constantes
 TEMPO_LIMITE = int(env.get('TEMPO_LIMITE', 180))
@@ -99,9 +101,17 @@ async def fetch(numero_processo: str, tentativas=0) -> dict:
 
     logger.info(f'Função fetch() iniciou. Processo: {numero_processo} - Tentativa {tentativas + 1}')
 
+    
+    headers = {
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+        "Host": "eprocwebcon.tjsc.jus.br",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36 Edg/134.0.0.0"
+    }
+    
     # Criar cliente HTTP para manter cookies e sessão
-    client = httpx.Client(timeout=TEMPO_LIMITE)
+    client = httpx.Client(timeout=TEMPO_LIMITE, verify=False, headers=headers)
 
+    
     try:
         # 1. Acessar a página inicial
         url_inicial = "https://eprocwebcon.tjsc.jus.br/consulta1g/externo_controlador.php?acao=processo_consulta_publica"
@@ -109,126 +119,132 @@ async def fetch(numero_processo: str, tentativas=0) -> dict:
         if response.status_code != 200:
             raise Exception(f"Falha ao acessar a página inicial: {response.status_code}")
 
-        # 2. Extrair a URL do CAPTCHA
-        soup = BeautifulSoup(response.read, "html.parser")
-        imagem_captcha = soup.find("img", {"id": "imgInfraCaptcha"})
-        label_captcha = soup.find("label", {"id": "lblInfraCaptcha"})
-        if not label_captcha:
-            raise Exception("Label do CAPTCHA não encontrada!")
 
-        imagem_captcha = label_captcha.find("img")
-        if not imagem_captcha:
-            raise Exception("Imagem do CAPTCHA não encontrada dentro do label!")
-
-        url_captcha = imagem_captcha.get("src")
-        if not url_captcha:
-            raise Exception("Atributo 'src' da imagem do CAPTCHA não encontrado!")
-
-        # 3. Resolver o CAPTCHA
-        if url_captcha.startswith("data:"):
-            _, codificado = url_captcha.split(",", 1)
-            bytes_imagem = base64.b64decode(codificado)
+        soup = BeautifulSoup(response, "html.parser")
+        if "Nossos sistemas detectaram" in soup.text:
+            # Pegar url captcha
+            url_captcha = soup.find("img", {"id": "imgInfraCaptcha"}).get("src")
         else:
-            response_captcha = client.get(url_captcha)
-            if response_captcha.status_code != 200:
-                raise Exception(f"Falha ao baixar a imagem do CAPTCHA: {response_captcha.status_code}")
-            bytes_imagem = response_captcha.content
+            
+            imagem_captcha = soup.find("img", {"id": "imgInfraCaptcha"})
+            label_captcha = soup.find("label", {"id": "lblInfraCaptcha"})
+            if not label_captcha:
+                raise Exception("Label do CAPTCHA não encontrada!")
 
-        # Tentar resolver o CAPTCHA com API
-        cliente_api = Client("Nischay103/captcha_recognition")
-        try:
-            with open("captcha_temporario.png", "wb") as arquivo:
-                arquivo.write(bytes_imagem)
-            resultado_ocr = cliente_api.predict(
-                input=handle_file("captcha_temporario.png"),
-                api_name="/predict"
-            ).strip()
-            logger.info(f"CAPTCHA reconhecido pela API: {resultado_ocr}")
-        except Exception as e:
-            logger.error(f"Erro ao usar a API captcha_recognition: {e}")
-            # Fallback para ddddocr
+            imagem_captcha = label_captcha.find("img")
+            if not imagem_captcha:
+                raise Exception("Imagem do CAPTCHA não encontrada dentro do label!")
+
+            url_captcha = imagem_captcha.get("src")
+            if not url_captcha:
+                raise Exception("Atributo 'src' da imagem do CAPTCHA não encontrado!")
+
+            # 3. Resolver o CAPTCHA
+            if url_captcha.startswith("data:"):
+                _, codificado = url_captcha.split(",", 1)
+                bytes_imagem = base64.b64decode(codificado)
+            else:
+                response_captcha = client.get(url_captcha)
+                if response_captcha.status_code != 200:
+                    raise Exception(f"Falha ao baixar a imagem do CAPTCHA: {response_captcha.status_code}")
+                bytes_imagem = response_captcha.content
+
+            # Tentar resolver o CAPTCHA com API
+            cliente_api = Client("Nischay103/captcha_recognition")
             try:
-                import ddddocr
-                motor_ocr = ddddocr.DdddOcr()
-                resultado_ocr = motor_ocr.classification(bytes_imagem)
-                logger.info(f"CAPTCHA reconhecido pelo ddddocr (fallback): {resultado_ocr}")
-            except Exception as fallback_e:
-                logger.error(f"Erro no fallback ddddocr: {fallback_e}")
-                raise
+                with open("captcha_temporario.png", "wb") as arquivo:
+                    arquivo.write(bytes_imagem)
+                resultado_ocr = cliente_api.predict(
+                    input=handle_file("captcha_temporario.png"),
+                    api_name="/predict"
+                ).strip()
+                logger.info(f"CAPTCHA reconhecido pela API: {resultado_ocr}")
+            except Exception as e:
+                logger.error(f"Erro ao usar a API captcha_recognition: {e}")
+                # Fallback para ddddocr
+                try:
+                    import ddddocr
+                    motor_ocr = ddddocr.DdddOcr()
+                    resultado_ocr = motor_ocr.classification(bytes_imagem)
+                    logger.info(f"CAPTCHA reconhecido pelo ddddocr (fallback): {resultado_ocr}")
+                except Exception as fallback_e:
+                    logger.error(f"Erro no fallback ddddocr: {fallback_e}")
+                    raise
 
-        # Validar o resultado do OCR
-        if not resultado_ocr or len(resultado_ocr) != 4 or not resultado_ocr.isalnum():
-            logger.warning(f"Resultado do OCR inválido: {resultado_ocr}. Reiniciando sessão...")
-            return await fetch(numero_processo, tentativas + 1)
+            # Validar o resultado do OCR
+            if not resultado_ocr or len(resultado_ocr) != 4 or not resultado_ocr.isalnum():
+                logger.warning(f"Resultado do OCR inválido: {resultado_ocr}. Reiniciando sessão...")
+                return await fetch(numero_processo, tentativas + 1)
 
-        # 4. Enviar o formulário via POST
-        form_data = {
-            "hdnInfraTipPagina": "1",
-            "sbmNovo": "Consultar",
-            "txtNumProcesso": numero_processo,
-            "txtNumChave": "",
-            "txtNumChaveDocumentos": "",
-            "txtParte": "",
-            "chkFonetica": "N",
-            "chkFoneticaS": "",
-            "txtStrOAB": "",
-            "rdTipo": "CPF",
-            "txtInfraCaptcha": resultado_ocr,
-            "hdnInfraCaptcha": "1",
-            "hdnInfraSelecoes": "Infra"
-        }
-        url_post = "https://eprocwebcon.tjsc.jus.br/consulta1g/externo_controlador.php?acao=processo_consulta_publica"
-        response_post = client.post(url_post, data=form_data, follow_redirects=False)
+            # 4. Enviar o formulário via POST
+            form_data = {
+                "hdnInfraTipPagina": "1",
+                "sbmNovo": "Consultar",
+                "txtNumProcesso": numero_processo,
+                "txtNumChave": "",
+                "txtNumChaveDocumentos": "",
+                "txtParte": "",
+                "chkFonetica": "N",
+                "chkFoneticaS": "",
+                "txtStrOAB": "",
+                "rdTipo": "CPF",
+                "txtInfraCaptcha": resultado_ocr,
+                "hdnInfraCaptcha": "1",
+                "hdnInfraSelecoes": "Infra"
+            }
+            url_post = "https://eprocwebcon.tjsc.jus.br/consulta1g/externo_controlador.php?acao=processo_consulta_publica"
+            response_post = client.post(url_post, data=form_data, follow_redirects=False)
 
-        # 5. Verificar redirecionamento
-        if response_post.status_code == 302:
-            redirect_url = response_post.headers["Location"]
-            logger.info(f"URL de redirecionamento: {redirect_url}")
-        else:
-            raise Exception(f"Requisição POST não resultou em redirecionamento: {response_post.status_code}")
+            # 5. Verificar redirecionamento
+            if response_post.status_code == 302:
+                redirect_url = response_post.headers["Location"]
+                logger.info(f"URL de redirecionamento: {redirect_url}")
+            else:
+                raise Exception(f"Requisição POST não resultou em redirecionamento: {response_post.status_code}")
 
-        # 6. Acessar a página de detalhes
-        response_get = client.get(redirect_url)
-        if response_get.status_code != 200:
-            raise Exception(f"Falha ao acessar a página de detalhes: {response_get.status_code}")
+            # 6. Acessar a página de detalhes
+            redirect_url = urljoin(url_inicial, redirect_url)
+            response_get = client.get(redirect_url, follow_redirects=True)
+            if response_get.status_code != 200:
+                raise Exception(f"Falha ao acessar a página de detalhes: {response_get.status_code}")
 
-        # 7. Capturar as movimentações
-        pagina_html = response_get.text
-        todas_movimentacoes = capturar_todas_movimentacoes(pagina_html)
+            # 7. Capturar as movimentações
+            pagina_html = response_get.text
+            todas_movimentacoes = capturar_todas_movimentacoes(pagina_html)
 
-        # 8. Processar os resultados
-        if not todas_movimentacoes or todas_movimentacoes == ["Nenhuma movimentação encontrada na tabela"]:
-            logger.error("Nenhuma movimentação encontrada para o processo.")
+            # 8. Processar os resultados
+            if not todas_movimentacoes or todas_movimentacoes == ["Nenhuma movimentação encontrada na tabela"]:
+                logger.error("Nenhuma movimentação encontrada para o processo.")
+                duration = time.time() - start_time
+                return {
+                    'code': 200,
+                    'message': 'Nenhuma movimentação encontrada para o processo.',
+                    'datetime': datetime.now().strftime('%d-%m-%Y %H:%M:%S'),
+                    'request_duration': duration
+                }
+
+            ultima_movimentacao_atual = todas_movimentacoes[0] if isinstance(todas_movimentacoes[0], Movimentacao) else None
+            logger.info(f"Última movimentação atual: {ultima_movimentacao_atual}")
+
+            if not ultima_movimentacao_atual:
+                logger.error("Nenhuma movimentação válida encontrada para o processo.")
+                duration = time.time() - start_time
+                return {
+                    'code': 200,
+                    'message': 'Nenhuma movimentação válida encontrada para o processo.',
+                    'datetime': datetime.now().strftime('%d-%m-%Y %H:%M:%S'),
+                    'request_duration': duration
+                }
+
+            logger.info("Processo consultado com sucesso.")
             duration = time.time() - start_time
             return {
-                'code': 400,
-                'message': 'Nenhuma movimentação encontrada para o processo.',
+                'code': 200,
+                'message': 'Consulta realizada com sucesso',
                 'datetime': datetime.now().strftime('%d-%m-%Y %H:%M:%S'),
+                'results': todas_movimentacoes,
                 'request_duration': duration
             }
-
-        ultima_movimentacao_atual = todas_movimentacoes[0] if isinstance(todas_movimentacoes[0], Movimentacao) else None
-        logger.info(f"Última movimentação atual: {ultima_movimentacao_atual}")
-
-        if not ultima_movimentacao_atual:
-            logger.error("Nenhuma movimentação válida encontrada para o processo.")
-            duration = time.time() - start_time
-            return {
-                'code': 400,
-                'message': 'Nenhuma movimentação válida encontrada para o processo.',
-                'datetime': datetime.now().strftime('%d-%m-%Y %H:%M:%S'),
-                'request_duration': duration
-            }
-
-        logger.info("Processo consultado com sucesso.")
-        duration = time.time() - start_time
-        return {
-            'code': 0,
-            'message': 'Consulta realizada com sucesso',
-            'results': todas_movimentacoes,
-            'datetime': datetime.now().strftime('%d-%m-%Y %H:%M:%S'),
-            'request_duration': duration
-        }
 
     except Exception as e:
         logger.error(f"Erro durante a consulta: {e}")
