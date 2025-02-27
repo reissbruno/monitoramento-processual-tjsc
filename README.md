@@ -84,9 +84,9 @@ API de automação para monitoramento de processos no Tribunal de Justiça de Sa
 
 
 
-| HTTP CODE | `code` | Descrição |
-| --------- | ------ | --------- |
-| `200`     | 0      | Sucesso |
-| `422`     | 7      | Não foi possível processar |
-| `502`     | 5      | Bad Gateway |
-| `512`     | 4      | Erro ao executar parse da página |
+| HTTP CODE | Descrição |
+| --------- | --------- |
+| `200`     |Sucesso |
+| `422`     |Não foi possível processar |
+| `502`     |Bad Gateway |
+| `512`     |Erro ao executar parse da página |
