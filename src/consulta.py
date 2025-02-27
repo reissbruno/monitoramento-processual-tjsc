@@ -114,7 +114,7 @@ async def fetch(numero_processo: str, telemetria: Telemetria) -> dict:
     results = None
 
     try:
-        # 1. Acessar a página inicial
+        # Acessar a página inicial
         url_inicial = "https://eprocwebcon.tjsc.jus.br/consulta1g/externo_controlador.php?acao=processo_consulta_publica"
         response = client.get(url_inicial, follow_redirects=False)
         content_length = response.headers.get('Content-Length')
@@ -144,7 +144,7 @@ async def fetch(numero_processo: str, telemetria: Telemetria) -> dict:
             if not url_captcha:
                 raise Exception("Atributo 'src' da imagem do CAPTCHA não encontrado!")
 
-            # 3. Resolver o CAPTCHA
+            # Resolver o CAPTCHA
             if url_captcha.startswith("data:"):
                 _, codificado = url_captcha.split(",", 1)
                 bytes_imagem = base64.b64decode(codificado)
@@ -193,7 +193,7 @@ async def fetch(numero_processo: str, telemetria: Telemetria) -> dict:
                 else:
                     raise Exception("Máximo de tentativas para resolver o CAPTCHA atingido.")
 
-            # 4. Enviar o formulário via POST
+            # Enviar o formulário via POST
             form_data = {
                 "hdnInfraTipPagina": "1",
                 "sbmNovo": "Consultar",
@@ -218,49 +218,51 @@ async def fetch(numero_processo: str, telemetria: Telemetria) -> dict:
             else:
                 telemetria.bytes_enviados += len(response_post.content)
 
-            # 5. Verificar redirecionamento
-            if response_post.status_code == 302:
-                redirect_url = response_post.headers["Location"]
-                logger.info(f"URL de redirecionamento: {redirect_url}")
-            else:
-                raise Exception(f"Requisição POST não resultou em redirecionamento: {response_post.status_code}")
 
-            # 6. Acessar a página de detalhes
-            redirect_url = urljoin(url_inicial, redirect_url)
-            response_get = client.get(redirect_url, follow_redirects=True)
-            content_length = response_get.headers.get('Content-Length')
-            if content_length:
-                telemetria.bytes_enviados += int(content_length)
-            else:
-                telemetria.bytes_enviados += len(response_get.content)
 
-            if response_get.status_code != 200:
-                raise Exception(f"Falha ao acessar a página de detalhes: {response_get.status_code}")
-
-            # 7. Capturar as movimentações
-            pagina_html = response_get.text
-            todas_movimentacoes = await capturar_todas_movimentacoes(pagina_html)
-
-            # 8. Processar os resultados
-            if not todas_movimentacoes or todas_movimentacoes == ["Nenhuma movimentação encontrada na tabela"]:
-                logger.error("Nenhuma movimentação encontrada para o processo.")
+            pagina_html = response_post.text
+            if "Processo não encontrado" in pagina_html:
                 results = {
                     'code': 200,
-                    'message': 'Nenhuma movimentação encontrada para o processo.',
+                    'message': 'Processo não encontrado',
                     'datetime': datetime.now().strftime('%d-%m-%Y %H:%M:%S'),
+                    'telemetria': telemetria
                 }
+                return results
             else:
-                ultima_movimentacao_atual = todas_movimentacoes[0] if isinstance(todas_movimentacoes[0], Movimentacao) else None
-                logger.info(f"Última movimentação atual: {ultima_movimentacao_atual}")
+                # Verificar redirecionamento
+                if response_post.status_code == 302:
+                    redirect_url = response_post.headers["Location"]
+                    logger.info(f"URL de redirecionamento: {redirect_url}")
+                else:
+                    raise Exception(f"Requisição POST não resultou em redirecionamento: {response_post.status_code}")
 
-                if not ultima_movimentacao_atual:
-                    logger.error("Nenhuma movimentação válida encontrada para o processo.")
+                # Acessar a página de detalhes
+                redirect_url = urljoin(url_inicial, redirect_url)
+                response_get = client.get(redirect_url, follow_redirects=True)
+                content_length = response_get.headers.get('Content-Length')
+                if content_length:
+                    telemetria.bytes_enviados += int(content_length)
+                else:
+                    telemetria.bytes_enviados += len(response_get.content)
+
+                if response_get.status_code != 200:
+                    raise Exception(f"Falha ao acessar a página de detalhes: {response_get.status_code}")
+
+                # Capturar as movimentações
+                pagina_html = response_get.text
+                todas_movimentacoes = await capturar_todas_movimentacoes(pagina_html)
+
+                # Processar os resultados
+                if not todas_movimentacoes or todas_movimentacoes == ["Nenhuma movimentação encontrada na tabela"]:
+                    logger.error("Nenhuma movimentação encontrada para o processo.")
                     results = {
                         'code': 200,
-                        'message': 'Nenhuma movimentação válida encontrada para o processo.',
+                        'message': 'Nenhuma movimentação encontrada para o processo.',
                         'datetime': datetime.now().strftime('%d-%m-%Y %H:%M:%S'),
                     }
                 else:
+                    
                     logger.info("Processo consultado com sucesso.")
                     results = {
                         'code': 200,
