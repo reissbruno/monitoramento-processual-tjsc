@@ -251,7 +251,34 @@ async def fetch(numero_processo: str, telemetria: Telemetria) -> dict:
 
                 # Capturar as movimentações
                 pagina_html = response_get.text
-                todas_movimentacoes = await capturar_todas_movimentacoes(pagina_html)
+                soup_novo = BeautifulSoup(pagina_html, "html.parser")
+                link = soup_novo.find(
+                    'a', 
+                    href=lambda href: href and "externo_controlador.php?acao=processo_seleciona_publica" in href,
+                    text=lambda t: t and "listar todos os eventos" in t.lower()
+                )
+                if link:
+                    
+                    link_href = link.get("href")
+                    url_base = "https://eprocwebcon.tjsc.jus.br/consulta1g/"
+                    url_eventos = urljoin(url_base, link_href) 
+                    response_eventos = client.get(url_eventos, follow_redirects=True, timeout=TEMPO_LIMITE)
+                    content_length = response_eventos.headers.get('Content-Length')
+                    if content_length:
+                        telemetria.bytes_enviados += int(content_length)
+                    else:
+                        telemetria.bytes_enviados += len(response_eventos.content)
+                    
+                    if response_eventos.status_code != 200:
+                        raise Exception(f"Falha ao acessar a página de eventos: {response_eventos.status_code}")
+                    
+                    pagina_html = response_eventos.text
+                    
+                    todas_movimentacoes = await capturar_todas_movimentacoes(pagina_html)
+                    
+                else:
+                    logger.warning("Link para eventos não encontrado na página de detalhes.")
+                    todas_movimentacoes = await capturar_todas_movimentacoes(pagina_html)
 
                 # Processar os resultados
                 if not todas_movimentacoes or todas_movimentacoes == ["Nenhuma movimentação encontrada na tabela"]:
