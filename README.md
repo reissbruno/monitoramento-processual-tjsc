@@ -28,8 +28,8 @@ API de automação para monitoramento de processos no Tribunal de Justiça de Sa
 
 
 1. Clone o repositório:
-- git clone https://github.com/reissbruno/monitoramento-processual
-- cd monitoramento-processual
+- git clone https://github.com/reissbruno/monitoramento-processual-tjsc
+- cd monitoramento-processual-tjsc
 
 
 2. Instale as dependências:
