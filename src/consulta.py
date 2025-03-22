@@ -1,27 +1,34 @@
 from os import environ as env
 from datetime import datetime
 import time
+import os
+import certifi
 from urllib.parse import urljoin
-import base64
 
 from fastapi.logger import logger
 from fastapi.responses import JSONResponse
+import base64
 from fastapi import status
 from bs4 import BeautifulSoup
-from gradio_client import Client, handle_file
 import httpx
+from capmonstercloudclient import CapMonsterClient, ClientOptions
+from capmonstercloudclient.requests import TurnstileProxylessRequest
 
 # Local imports
 from src.models import Movimentacao, Telemetria
 
+
 # Captura variáveis de ambiente e cria constantes
 TEMPO_LIMITE = int(env.get('TEMPO_LIMITE', 180))
-TENTATIVAS_MAXIMAS_CAPTCHA = int(env.get('TENTATIVAS_MAXIMAS_CAPCAPTCHA', 30))  
-TENTATIVAS_MAXIMAS_RECURSIVAS = int(env.get('TENTATIVAS_MAXIMAS_RECURSIVAS', 30))  
+TENTATIVAS_MAXIMAS_CAPTCHA = int(env.get('TENTATIVAS_MAXIMAS_CAPTCHA', 5))  
+TENTATIVAS_MAXIMAS_RECURSIVAS = int(env.get('TENTATIVAS_MAXIMAS_RECURSIVAS', 5))  
+CAPMONSTER_API_KEY = env.get('CAPMONSTER_API_KEY')
+
 
 # Função para formatar o número do processo
 def formatar_numero_processo(numero_processo):
     return ''.join(filter(str.isdigit, numero_processo))
+
 
 # Função para capturar todas as movimentações da página HTML
 async def capturar_todas_movimentacoes(pagina_html):
@@ -60,7 +67,6 @@ async def capturar_todas_movimentacoes(pagina_html):
                 link_documento = link_documento_elemento['href']
                 link_documento_completo = urljoin(url_geral, link_documento)
 
-
             movimentacao = Movimentacao(
                 evento=evento,
                 data_hora=data_hora,
@@ -72,10 +78,28 @@ async def capturar_todas_movimentacoes(pagina_html):
 
     return movimentacoes if movimentacoes else ["Nenhuma movimentação encontrada na tabela"]
 
+
+# Resolve o CAPTCHA Turnstile usando o CapMonster
+async def resolver_captcha_turnstile(website_url: str, site_key: str, page_data: str) -> dict:
+    os.environ['SSL_CERT_FILE'] = certifi.where()
+
+    client_options = ClientOptions(api_key=CAPMONSTER_API_KEY)
+    cap_monster_client = CapMonsterClient(options=client_options)
+
+    turnstile_request = TurnstileProxylessRequest(
+        websiteURL=website_url,
+        websiteKey=site_key,
+        pageData=page_data
+    )
+
+    solution = await cap_monster_client.solve_captcha(turnstile_request)
+    return solution
+
+
 # Função principal para acessar o site do TJSC e capturar as movimentações com httpx
 async def fetch(numero_processo: str, telemetria: Telemetria) -> dict:
     """
-    Função que acessa a página inicial do TJSC com httpx, resolve o CAPTCHA com retry,
+    Função que acessa a página inicial do TJSC com httpx, resolve o CAPTCHA Turnstile com retry,
     envia o formulário via POST e captura as movimentações do processo. Retorna os
     resultados como objetos Movimentacao, incluindo links de documentos e a duração
     da requisição.
@@ -125,102 +149,81 @@ async def fetch(numero_processo: str, telemetria: Telemetria) -> dict:
 
         if response.status_code != 200:
             raise Exception(f"Falha ao acessar a página inicial: {response.status_code}")
+        
+        page_data = base64.b64encode(response.text.encode('utf-8')).decode('utf-8')
 
-        soup = BeautifulSoup(response, "html.parser")
-        if "Nossos sistemas detectaram" in soup.text:
-            # Pegar url captcha
-            url_captcha = soup.find("img", {"id": "imgInfraCaptcha"}).get("src")
+        soup = BeautifulSoup(response.text, "html.parser")
+
+        # Verificar se o CAPTCHA Turnstile está presente
+        turnstile_div = soup.find("div", class_="cf-turnstile")
+        if not turnstile_div:
+            raise Exception("Elemento do CAPTCHA Turnstile não encontrado na página inicial.")
+
+        site_key = turnstile_div.get("data-sitekey")
+        if not site_key:
+            raise Exception("Chave do site (data-sitekey) não encontrada no elemento Turnstile.")
+
+        # Resolver o CAPTCHA Turnstile
+        telemetria.captchas_resolvidos += 1
+        solution = await resolver_captcha_turnstile(url_inicial, site_key, page_data)
+
+        token = solution.get("token")
+
+        form_data = {
+            "hdnInfraTipPagina": "1",
+            "sbmNovo": "Consultar",
+            "txtNumProcesso": numero_processo,
+            "txtNumChave": "",
+            "txtNumChaveDocumentos": "",
+            "txtParte": "",
+            "chkFonetica": "N",
+            "chkFoneticaS": "",
+            "txtStrOAB": "",
+            "rdTipo": "CPF",
+            "cf-turnstile-response": token, 
+            "hdnInfraCaptcha": "0"
+            "hdnInfraSelecoes" "Infra"
+        }
+        url_post = "https://eprocwebcon.tjsc.jus.br/consulta1g/externo_controlador.php?acao=processo_consulta_publica"
+
+        response_post = client.post(url_post, data=form_data, follow_redirects=False)
+        content_length = response_post.headers.get('Content-Length')
+        if content_length:
+            telemetria.bytes_enviados += int(content_length)
         else:
-            imagem_captcha = soup.find("img", {"id": "imgInfraCaptcha"})
-            label_captcha = soup.find("label", {"id": "lblInfraCaptcha"})
-            if not label_captcha:
-                raise Exception("Label do CAPTCHA não encontrada!")
+            telemetria.bytes_enviados += len(response_post.content)
 
-            imagem_captcha = label_captcha.find("img")
-            if not imagem_captcha:
-                raise Exception("Imagem do CAPTCHA não encontrada dentro do label!")
-
-            url_captcha = imagem_captcha.get("src")
-            if not url_captcha:
-                raise Exception("Atributo 'src' da imagem do CAPTCHA não encontrado!")
-
-            # Resolver o CAPTCHA
-            if url_captcha.startswith("data:"):
-                _, codificado = url_captcha.split(",", 1)
-                bytes_imagem = base64.b64decode(codificado)
-            else:
-                response_captcha = client.get(url_captcha)
-                content_length = response_captcha.headers.get('Content-Length')
-                if content_length:
-                    telemetria.bytes_enviados += int(content_length)
-                else:
-                    telemetria.bytes_enviados += len(response.content)
-                if response_captcha.status_code != 200:
-                    raise Exception(f"Falha ao baixar a imagem do CAPTCHA: {response_captcha.status_code}")
-                bytes_imagem = response_captcha.content
-
-            # Tentar resolver o CAPTCHA com API
-            cliente_api = Client("Nischay103/captcha_recognition")
-            telemetria.captchas_resolvidos += 1
-            try:
-                with open("captcha_temporario.png", "wb") as arquivo:
-                    arquivo.write(bytes_imagem)
-                resultado_ocr = cliente_api.predict(
-                    input=handle_file("captcha_temporario.png"),
-                    api_name="/predict"
-                ).strip()
-                logger.info(f"CAPTCHA reconhecido pela API: {resultado_ocr}")
-            except Exception as e:
-                logger.error(f"Erro ao usar a API captcha_recognition: {e}")
-                # Fallback para ddddocr
-                try:
-                    import ddddocr
-                    motor_ocr = ddddocr.DdddOcr()
-                    resultado_ocr = motor_ocr.classification(bytes_imagem)
-                    logger.info(f"CAPTCHA reconhecido pelo ddddocr (fallback): {resultado_ocr}")
-                except Exception as fallback_e:
-                    logger.error(f"Erro no fallback ddddocr: {fallback_e}")
-                    raise
-
-            # Validar o resultado do OCR
-            if not resultado_ocr or len(resultado_ocr) != 4 or not resultado_ocr.isalnum():
-                logger.warning(f"Resultado do OCR inválido: {resultado_ocr}. Reiniciando sessão...")
-                client.close()
-                if telemetria.tentativas < TENTATIVAS_MAXIMAS_CAPTCHA:
-                    logger.info("Tentando resolver o CAPTCHA novamente...")
-                    telemetria.tentativas += 1
-                    return await fetch(numero_processo, telemetria)
-                else:
-                    raise Exception("Máximo de tentativas para resolver o CAPTCHA atingido.")
-
-            # Enviar o formulário via POST
-            form_data = {
-                "hdnInfraTipPagina": "1",
-                "sbmNovo": "Consultar",
-                "txtNumProcesso": numero_processo,
-                "txtNumChave": "",
-                "txtNumChaveDocumentos": "",
-                "txtParte": "",
-                "chkFonetica": "N",
-                "chkFoneticaS": "",
-                "txtStrOAB": "",
-                "rdTipo": "CPF",
-                "txtInfraCaptcha": resultado_ocr,
-                "hdnInfraCaptcha": "1",
-                "hdnInfraSelecoes": "Infra"
+        pagina_html = response_post.text
+        if "Processo não encontrado" in pagina_html:
+            results = {
+                'code': 200,
+                'message': 'Processo não encontrado',
+                'datetime': datetime.now().strftime('%d-%m-%Y %H:%M:%S'),
+                'telemetria': telemetria
             }
-            url_post = "https://eprocwebcon.tjsc.jus.br/consulta1g/externo_controlador.php?acao=processo_consulta_publica"
+            return results
+        else:
+            # Verificar redirecionamento
+            if response_post.status_code == 302:
+                redirect_url = response_post.headers["Location"]
+                logger.info(f"URL de redirecionamento: {redirect_url}")
+            else:
+                raise Exception(f"Requisição POST não resultou em redirecionamento: {response_post.status_code}")
 
-            response_post = client.post(url_post, data=form_data, follow_redirects=False)
-            content_length = response_post.headers.get('Content-Length')
+            # Acessar a página de detalhes
+            redirect_url = urljoin(url_inicial, redirect_url)
+            response_get = client.get(redirect_url, follow_redirects=True)
+            content_length = response_get.headers.get('Content-Length')
             if content_length:
                 telemetria.bytes_enviados += int(content_length)
             else:
-                telemetria.bytes_enviados += len(response_post.content)
+                telemetria.bytes_enviados += len(response_get.content)
 
+            if response_get.status_code != 200:
+                raise Exception(f"Falha ao acessar a página de detalhes: {response_get.status_code}")
 
-
-            pagina_html = response_post.text
+            # Capturar as movimentações
+            pagina_html = response_get.text
             if "Processo não encontrado" in pagina_html:
                 results = {
                     'code': 200,
