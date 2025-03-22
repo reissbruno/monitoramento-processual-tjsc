@@ -7,17 +7,16 @@ API de automação para monitoramento de processos no Tribunal de Justiça de Sa
 ## Funcionalidades
 - Consulta automática de processos no site do TJSC
 - Captura de movimentações processuais, incluindo eventos, data/hora, descrição e documentos
-- Resolução automática de CAPTCHA utilizando OCR
+- Resolução automática de CAPTCHA utilizando Capmonster
 - Endpoint REST para integração com outras aplicações
 
 
 ## Tecnologias Utilizadas
 - **FastAPI**: Framework para construção de APIs rápidas e performáticas
-- **Selenium**: Automação de navegação web para consulta processual
+- **HTTPX**: Para as requisições http
 - **BeautifulSoup**: Extração e parsing de dados HTML
 - **Uvicorn**: Servidor ASGI para execução do FastAPI
 - **Docker**: Containerização para facilidade de deployment
-
 
 ## Requisitos
 - Python 3.9 ou superior
